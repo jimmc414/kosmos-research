@@ -16,6 +16,14 @@ from kosmos.core.llm import get_client
 from kosmos.models.result import ExperimentResult, ResultStatus, StatisticalTestResult
 from kosmos.models.hypothesis import Hypothesis
 
+# Try to import SkillLoader for scientific skills integration
+try:
+    from kosmos.agents.skill_loader import SkillLoader
+    SKILL_LOADER_AVAILABLE = True
+except ImportError:
+    SKILL_LOADER_AVAILABLE = False
+    logger.warning("SkillLoader not available. Data analyst will use base prompts only.")
+
 logger = logging.getLogger(__name__)
 
 
@@ -151,6 +159,20 @@ class DataAnalystAgent(BaseAgent):
 
         # Components
         self.llm_client = get_client()
+
+        # Scientific skills integration
+        if SKILL_LOADER_AVAILABLE:
+            try:
+                self.skill_loader = SkillLoader()
+                self.use_skills = True
+                logger.info("SkillLoader initialized for domain expertise")
+            except Exception as e:
+                logger.warning(f"Failed to initialize SkillLoader: {e}")
+                self.skill_loader = None
+                self.use_skills = False
+        else:
+            self.skill_loader = None
+            self.use_skills = False
 
         # State: Store interpretations for pattern detection
         self.interpretation_history: List[ResultInterpretation] = []
@@ -336,6 +358,13 @@ Domain: {hypothesis.domain}
 Expected Outcome: {getattr(hypothesis, 'expected_outcome', 'Not specified')}
 """)
 
+        # Load relevant scientific skills
+        if self.use_skills and self.skill_loader:
+            skills_text = self._load_relevant_skills(hypothesis, result_summary)
+            if skills_text:
+                prompt_parts.append(skills_text)
+                prompt_parts.append("\n" + "=" * 80 + "\n")
+
         # Result summary
         prompt_parts.append(f"""
 EXPERIMENTAL RESULTS:
@@ -466,6 +495,91 @@ Format your response as JSON with the following structure:
             patterns_detected=[],
             overall_assessment="Automated fallback interpretation - Claude unavailable"
         )
+
+    def _load_relevant_skills(
+        self,
+        hypothesis: Optional[Hypothesis],
+        result_summary: Dict[str, Any]
+    ) -> str:
+        """
+        Load relevant scientific skills for result interpretation.
+
+        Determines which skills are relevant based on:
+        - Hypothesis domain (genomics, single_cell, drug_discovery, etc.)
+        - Test types used in results
+        - Variables analyzed
+
+        Args:
+            hypothesis: Optional hypothesis being tested
+            result_summary: Summary of experimental results
+
+        Returns:
+            Formatted skills text for prompt injection, or empty string if none
+        """
+        if not self.skill_loader:
+            return ""
+
+        # Map hypothesis domains to skill bundles
+        domain_to_task_type = {
+            "genomics": "genomics_analysis",
+            "transcriptomics": "single_cell_analysis",
+            "single_cell": "single_cell_analysis",
+            "proteomics": "proteomics",
+            "drug_discovery": "drug_discovery",
+            "cheminformatics": "cheminformatics",
+            "systems_biology": "systems_biology",
+            "clinical": "clinical_research",
+            "pathway": "pathway_analysis",
+            "network": "network_analysis"
+        }
+
+        task_type = None
+        libraries = []
+
+        # Determine task type from hypothesis domain
+        if hypothesis:
+            domain = hypothesis.domain.lower()
+            for key, val in domain_to_task_type.items():
+                if key in domain:
+                    task_type = val
+                    break
+
+        # Infer libraries from test types
+        primary_test = result_summary.get("primary_test", "").lower()
+
+        if "t-test" in primary_test or "anova" in primary_test:
+            libraries.append("statsmodels")
+            libraries.append("scikit-learn")
+        elif "deseq" in primary_test or "differential" in primary_test:
+            libraries.append("pydeseq2")
+            if not task_type:
+                task_type = "genomics_analysis"
+        elif "scanpy" in primary_test or "single-cell" in primary_test:
+            libraries.append("scanpy")
+            libraries.append("anndata")
+            if not task_type:
+                task_type = "single_cell_analysis"
+
+        # Load skills
+        try:
+            if task_type or libraries:
+                skills_text = self.skill_loader.load_skills_for_task(
+                    task_type=task_type,
+                    libraries=libraries if libraries else None,
+                    include_examples=False  # Don't include examples for result interpretation
+                )
+
+                if skills_text:
+                    logger.info(
+                        f"Loaded skills for task_type={task_type}, "
+                        f"libraries={libraries}"
+                    )
+                    return skills_text
+
+        except Exception as e:
+            logger.warning(f"Failed to load skills: {e}")
+
+        return ""
 
     # ========================================================================
     # ANOMALY DETECTION
