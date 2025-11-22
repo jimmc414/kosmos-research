@@ -31,6 +31,14 @@ from kosmos.validation.scholar_eval import ScholarEvalValidator
 from kosmos.compression import ContextCompressor
 from kosmos.agents.data_analyst import DataAnalystAgent
 
+# Try to import report synthesizer (Phase 3 enhancement)
+try:
+    from kosmos.reporting import ReportSynthesizer
+    REPORT_SYNTHESIZER_AVAILABLE = True
+except ImportError:
+    REPORT_SYNTHESIZER_AVAILABLE = False
+    logger.warning("ReportSynthesizer not available. Using basic markdown reports.")
+
 logger = logging.getLogger(__name__)
 
 
@@ -119,6 +127,12 @@ class ResearchWorkflow:
             "use_literature_context": True,
             "detailed_interpretation": True
         })
+
+        # Report synthesizer (Phase 3 enhancement)
+        if REPORT_SYNTHESIZER_AVAILABLE:
+            self.report_synthesizer = ReportSynthesizer(use_scientific_writer=True)
+        else:
+            self.report_synthesizer = None
 
         # Research state
         self.current_cycle = 0
@@ -482,23 +496,84 @@ class ResearchWorkflow:
         """
         Generate final research report.
 
-        This will be enhanced with scientific-writer in Phase 3.
-        For now, generates a structured markdown report.
+        Uses ReportSynthesizer with scientific-writer if available (Phase 3).
+        Falls back to markdown generation if not.
 
         Args:
             cycle_summaries: List of cycle summary dicts
 
         Returns:
-            Path to final report
+            Path to final report (PDF if scientific-writer, otherwise markdown)
         """
-        report_path = self.output_dir / "final_research_report.md"
 
-        # Get all findings
+        # Get all validated findings
         all_findings = []
         for cycle in range(1, self.current_cycle + 1):
             all_findings.extend(self.state_manager.get_all_cycle_findings(cycle))
 
-        # Build report
+        # Filter for validated findings
+        validated_findings = [
+            f for f in all_findings
+            if f.get("scholar_eval", {}).get("passes_threshold", False)
+        ]
+
+        # Use ReportSynthesizer if available
+        if self.report_synthesizer:
+            logger.info("Using scientific-writer for publication-quality report...")
+
+            methodology = """
+This research was conducted using the Kosmos autonomous research system,
+which integrates multiple AI components:
+
+1. **Task Planning**: Karpathy-style Plan Creator/Reviewer agents with 5-dimension
+   quality validation and exploration/exploitation balance.
+
+2. **Task Execution**: Delegation Manager coordinating specialized agents
+   (data analysis, literature review, hypothesis generation) with parallel execution.
+
+3. **Quality Control**: ScholarEval 8-dimension peer review framework validating
+   all discoveries before inclusion in results.
+
+4. **Novelty Detection**: Vector-based semantic similarity search preventing
+   redundant work and ensuring exploration of novel directions.
+
+5. **Domain Expertise**: Integration of 120+ scientific skills providing
+   domain-specific knowledge and best practices.
+
+6. **Context Management**: Hierarchical compression achieving 20x reduction
+   in context size while preserving critical information.
+"""
+
+            result = await self.report_synthesizer.generate_research_report(
+                findings=validated_findings,
+                research_objective=self.research_objective,
+                methodology=methodology,
+                output_dir=str(self.output_dir),
+                cycle_summaries=cycle_summaries,
+                metadata={
+                    "total_cycles": self.current_cycle,
+                    "total_tasks": self.total_tasks_executed,
+                    "total_findings": self.total_findings,
+                    "validated_findings": self.validated_findings
+                }
+            )
+
+            if result['status'] == 'success':
+                if result['pdf_path']:
+                    logger.info(f"Publication-quality PDF generated: {result['pdf_path']}")
+                    return Path(result['pdf_path'])
+                elif result['tex_path']:
+                    logger.info(f"LaTeX source generated: {result['tex_path']}")
+                    return Path(result['tex_path'])
+                elif result['markdown_path']:
+                    logger.info(f"Markdown report generated: {result['markdown_path']}")
+                    return Path(result['markdown_path'])
+
+        # Fall back to basic markdown report
+        logger.info("Generating basic markdown report...")
+        report_path = self.output_dir / "final_research_report.md"
+
+        # Build markdown report
         report = f"""# Research Report: {self.research_objective}
 
 **Generated**: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}
